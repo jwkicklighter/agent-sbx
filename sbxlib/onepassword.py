@@ -20,6 +20,7 @@ from .run import CommandError, Runner
 
 CATEGORY = "SSH Key"
 TITLE = "sbx"
+CA_TITLE = "sbx mkcert CA"  # a Document item: the PUBLIC rootCA.pem, never the key
 # The first op that knows the SSH Key category and --ssh-generate-key. An
 # older op fails with "Unknown item category SSH Key".
 MIN_VERSION = (2, 20, 0)
@@ -171,3 +172,29 @@ def agent_keys(runner: Runner, sock: str | Path) -> list[str]:
 
 def lists_key(lines: list[str], pubkey: str) -> bool:
     return any(same_key(l, pubkey) for l in lines)
+
+
+# --- the mkcert CA ------------------------------------------------------------
+
+def has_document(runner: Runner, title: str = CA_TITLE) -> bool:
+    out = _run(runner, ["op", "document", "list", "--format", "json"])
+    try:
+        items = json.loads(out or "[]")
+    except ValueError:
+        raise OpError("op document list: the output is not JSON") from None
+    return any(isinstance(i, dict) and i.get("title") == title for i in items or [])
+
+
+def get_document(runner: Runner, title: str = CA_TITLE) -> str:
+    return _run(runner, ["op", "document", "get", title])
+
+
+def create_document(runner: Runner, data: str, title: str = CA_TITLE, vault: str = "") -> None:
+    """The document goes over stdin, so no temp file holds it."""
+    argv = ["op", "document", "create", "-", "--title", title, "--file-name", "rootCA.pem"]
+    if vault:
+        argv += ["--vault", vault]
+    try:
+        runner.run(argv, input=data.encode())
+    except CommandError as exc:
+        raise OpError(f"op document create: {exc.stderr.strip() or 'exit ' + str(exc.code)}") from None

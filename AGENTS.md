@@ -75,6 +75,8 @@ A shared key (the domain, the bridges, the subnets, the IDs) belongs in
     `sbx autostart`, `sbx extend`, `sbx gpu attach|detach`
   - `sbx remote-control` (it puts a full claude.ai login in a sandbox;
     `--allow-agent` puts one in an agent sandbox, where the agent can read it)
+  - `sbx import-ca` (it adds a CA to this machine's trust stores, with `sudo`; `--upload` writes the CA
+    certificate, not its key, into 1Password)
   - `sbx claude-token` without `--status` (it writes into every running sandbox)
 - **These commands are safe to run at any time:** `sbx doctor`, `sbx guide`,
   `sbx list`, `sbx projects`, `sbx inputs <project>`, `sbx versions`,

@@ -26,12 +26,14 @@ from . import inputs as inputs_mod
 from . import layout as layout_mod
 from . import manifest as manifest_mod
 from . import names
+from . import onepassword
 from . import previews as previews_mod
 from . import projects as projects_mod
 from . import remotecontrol
 from . import secretstore
 from . import sessions as sessions_mod
 from . import templates as templates_mod
+from . import trustcert
 from . import versions as versions_mod
 from .config import Config, ConfigError, load as load_config, local_conf_path, state_dir
 from .inputs import PLACEHOLDER, REPO, SEND, InputError
@@ -1176,6 +1178,7 @@ def _install_cert(cfg: Config, runner: Runner, vm: Vm) -> bool:
     vm.put(cert.read_bytes(), "/etc/sbx/tls/cert.pem", mode="0644", sudo=True)
     vm.put(key.read_bytes(), "/etc/sbx/tls/key.pem", mode="0640", sudo=True, group="caddy")
     vm.run("sudo systemctl restart caddy sbx-mirror")
+    _publish_ca(cfg, runner)
     return True
 
 
@@ -1653,6 +1656,75 @@ def cmd_ssh(args, cfg: Config, runner: Runner, api=None) -> int:
     # `ls code`, and a quoted 'a; b' stays one argument that the remote shell
     # splits. shlex.join would turn that into one word, a command not found.
     os.execvp("ssh", argv + (["--", " ".join(args.command)] if args.command else []))
+
+
+def cmd_import_ca(args, cfg: Config, runner: Runner, api=None) -> int:
+    """Trust the mkcert CA that signed the sandboxes' certificates, or (--upload)
+    keep this machine's CA in 1Password for the others."""
+    if args.upload and (args.file or args.verify_with):
+        raise ConfigError("--upload takes no --file and no --verify-with")
+    try:
+        if args.upload:
+            return _upload_ca(runner)
+        if args.file:
+            ca = trustcert.parse(Path(args.file).expanduser().read_text())
+        elif onepassword.available(runner):
+            info(f"reading the CA from 1Password (the item {onepassword.CA_TITLE})")
+            ca = trustcert.parse(onepassword.get_document(runner))
+        else:
+            warn("no CA to import: pass --file rootCA.pem, or sign in to the 1Password CLI (`op signin`) "
+                 f"where the item {onepassword.CA_TITLE} lives (`sbx import-ca --upload` makes it)")
+            return 1
+        if args.verify_with:
+            hostname = names.hostname(args.verify_with)
+            _pve(cfg, runner, api).require(hostname)
+            if not trustcert.verify(runner, ca, trustcert.fetch(Vm(cfg, runner, hostname))):
+                warn(f"this CA did not sign the certificate of {hostname}: not trusted")
+                return 1
+            info(f"this CA signed the certificate of {hostname}")
+        else:
+            warn("the CA was not checked against a sandbox (--verify-with <name> checks it)")
+        info("trusting the CA on this machine (sudo may ask for your password)")
+        stores = trustcert.install(runner, trustcert.CA_NAME, ca)
+    except (trustcert.TrustError, onepassword.OpError, OSError) as e:
+        warn(str(e))
+        return 1
+    for line in stores:
+        info(f"added to {line}")
+    info("restart the browser")
+    return 0
+
+
+def _upload_ca(runner: Runner) -> int:
+    """The public rootCA.pem of this machine into 1Password. Never the key."""
+    root = _mkcert_root(runner) if shutil.which("mkcert") else None
+    if root is None:
+        warn("no mkcert CA on this machine (`mkcert -install` makes one)")
+        return 1
+    ca = trustcert.parse(root.read_text())
+    if not onepassword.available(runner):
+        warn("the 1Password CLI (`op`) is missing or not signed in")
+        return 1
+    if onepassword.has_document(runner):
+        if trustcert.parse(onepassword.get_document(runner)) == ca:
+            info(f"1Password has this CA already (the item {onepassword.CA_TITLE})")
+            return 0
+        warn(f"1Password has an item {onepassword.CA_TITLE} with another CA. Delete it there first; "
+             "sbx does not replace it")
+        return 1
+    onepassword.create_document(runner, ca)
+    info(f"the CA certificate (not its key) is in 1Password as {onepassword.CA_TITLE}")
+    return 0
+
+
+def _publish_ca(cfg: Config, runner: Runner) -> None:
+    """After a certificate was made: with 1Password in use and no CA item yet,
+    store this machine's CA there. Best effort; `sbx import-ca --upload` says why."""
+    try:
+        if cfg.ssh_agent and onepassword.available(runner) and not onepassword.has_document(runner):
+            _upload_ca(runner)
+    except (trustcert.TrustError, onepassword.OpError, OSError) as e:
+        warn(f"the CA is not in 1Password: {e}")
 
 
 def _herdr_add(runner: Runner, hostname: str) -> None:
@@ -2226,6 +2298,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--sidecar", action="store_true", help="the sandbox's sidecar instead of the sandbox")
     s.add_argument("command", nargs="*")
     s.set_defaults(fn=cmd_ssh)
+
+    s = sub.add_parser("import-ca", help="trust the mkcert CA that signed your sandboxes' certificates (another machine made them)")
+    s.add_argument("--file", metavar="PEM", help="the rootCA.pem to trust, instead of the one in 1Password")
+    s.add_argument("--verify-with", metavar="NAME", help="a sandbox: refuse the CA unless it signed that sandbox's certificate")
+    s.add_argument("--upload", action="store_true", help="put this machine's CA certificate (not its key) into 1Password")
+    s.set_defaults(fn=cmd_import_ca)
 
     s = sub.add_parser("herdr", help="put the sandbox in your herdr sidebar (or --attach: a full window on it)")
     s.add_argument("name")
